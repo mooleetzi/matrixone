@@ -38,7 +38,10 @@ const (
 	defaultNetBufferLength = mpool.MB
 	minNetBufferLength     = mpool.KB * 16
 	maxNetBufferLength     = mpool.MB * 16
+	defaultTrxBatchLength  = mpool.MB * 128
 	timeout                = 10 * time.Second
+	trxBegin               = "BEGIN;\n"
+	trxCommit              = "COMMIT;\n"
 )
 
 var (
@@ -272,10 +275,13 @@ func showInsert(db string, tbl string, bufPool *sync.Pool, netBufferLength int) 
 	curBuf := bufPool.Get().(*bytes.Buffer)
 	buf.Grow(netBufferLength)
 	initInert := "INSERT INTO `" + tbl + "` VALUES "
+	curTrxLen := 0
+	trxFirstInsert := true
+	insertFirstValue := true
 	for {
 		buf.WriteString(initInert)
 		preLen := buf.Len()
-		first := true
+		insertFirstValue = true
 		if curBuf.Len() > 0 {
 			bts := curBuf.Bytes()
 			if bts[0] == ',' {
@@ -283,18 +289,18 @@ func showInsert(db string, tbl string, bufPool *sync.Pool, netBufferLength int) 
 			}
 			buf.Write(bts)
 			curBuf.Reset()
-			first = false
+			insertFirstValue = false
 		}
 		for r.Next() {
 			err = r.Scan(args...)
 			if err != nil {
 				return err
 			}
-			if !first {
+			if !insertFirstValue {
 				curBuf.WriteString(",(")
 			} else {
 				curBuf.WriteString("(")
-				first = false
+				insertFirstValue = false
 			}
 
 			for i, v := range args {
@@ -311,15 +317,28 @@ func showInsert(db string, tbl string, bufPool *sync.Pool, netBufferLength int) 
 			curBuf.Reset()
 		}
 		if buf.Len() > preLen {
+			if trxFirstInsert {
+				trxFirstInsert = false
+				fmt.Printf(trxBegin)
+			}
 			buf.WriteString(";\n")
+			curTrxLen += buf.Len()
 			_, err = buf.WriteTo(os.Stdout)
 			if err != nil {
 				return err
+			}
+			if curTrxLen >= defaultTrxBatchLength {
+				curTrxLen = 0
+				trxFirstInsert = true
+				fmt.Printf(trxCommit)
 			}
 			continue
 		}
 		if curBuf.Len() > 0 {
 			continue
+		}
+		if !trxFirstInsert {
+			fmt.Printf(trxCommit)
 		}
 		buf.Reset()
 		curBuf.Reset()
